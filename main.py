@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request,HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +13,7 @@ load_dotenv(dotenv_path, override=True)
 
 print("Loaded OpenRouter Key:", os.getenv("OPENROUTER_API_KEY"))
 print("Loaded Langfuse Public Key:", os.getenv("LANGFUSE_PUBLIC_KEY"))
+API_KEY = os.getenv("API_KEY")
 
 app = FastAPI()
 
@@ -55,6 +56,12 @@ def home(request: Request):
 
 @app.post("/chat/stream")
 async def stream_chat(request: Request):
+    # Check API key
+    key = request.headers.get("x-api-key")
+    if key != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
+
+
     data = await request.json()
     conversation = data if isinstance(data, list) else data.get("conversation", [])
 
