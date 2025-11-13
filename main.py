@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -7,16 +7,14 @@ import os, json, requests
 from dotenv import load_dotenv
 from langfuse import Langfuse
 
-# ------------------ ENV SETUP ------------------
+# ---------------- ENV ----------------
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path, override=True)
 
-API_KEY = os.getenv("API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# ------------------ App Setup ------------------
+# ---------------- App ----------------
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,61 +22,76 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# ------------------ Langfuse ------------------
+# ---------------- Langfuse ----------------
 langfuse = Langfuse(
     public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
     secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
     host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 )
 
-# ------------------ OpenRouter ------------------
+# ---------------- OpenRouter ----------------
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "Content-Type": "application/json",
 }
 
-# ------------------ Routes ------------------
+# ---------------- Trace storage ----------------
+# Maps session ID -> Langfuse trace ID
+session_traces = {}
+
+# ---------------- Routes ----------------
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-
 @app.post("/chat/stream")
-async def stream_chat(request: Request):
-    # ----------- API Key Auth -----------
-    key = request.headers.get("x-api-key")
-    if key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
+async def stream_chat(
+    request: Request,
+    x_session_id: str = Header(None),
+    reset: bool = False
+):
+    if not x_session_id:
+        raise HTTPException(status_code=400, detail="Missing session ID")
 
-    # ----------- Extract Conversation -----------
+    session_id = x_session_id
+
+    # ---------- Reset trace ----------
+    if reset:
+        session_traces.pop(session_id, None)
+
+    # ---------- Extract conversation ----------
     data = await request.json()
     conversation = data if isinstance(data, list) else data.get("conversation", [])
-    if not conversation:
+    if not conversation and not reset:
         return {"error": "Empty conversation"}
 
-    # ----------- Langfuse Trace -----------
-    trace_id = langfuse.create_trace_id()
-    print(f"Langfuse trace started: {trace_id}")
+    # ---------- Langfuse trace ----------
+    if session_id in session_traces:
+        trace_id = session_traces[session_id]
+        print(f"Using existing Langfuse trace: {trace_id}")
+    else:
+        trace_id = langfuse.create_trace_id()
+        session_traces[session_id] = trace_id
+        print(f"Created new Langfuse trace: {trace_id}")
 
-    # ----------- Extract Last User Input -----------
+    # ---------- Last user message ----------
     user_input = ""
     for msg in reversed(conversation):
         if msg.get("role") == "user" and msg.get("content"):
             user_input = msg["content"]
             break
-    if not user_input:
+    if not user_input and not reset:
         return {"error": "No valid user message found"}
 
-    # ----------- Fetch Langfuse Prompt -----------
-    system_prompt = langfuse.get_prompt("system/default")  # replace with your prompt path
-    system_content = system_prompt.get("text", "You are a helpful assistant.")  # fallback
+    # ---------- System prompt ----------
+    system_prompt = langfuse.get_prompt("system/default")
+    system_content = getattr(system_prompt, "text", "You are a helpful assistant.")
 
-    # ----------- Streaming Response -----------
+    # ---------- Streaming Response ----------
     def event_stream():
         collected_output = ""
         try:
